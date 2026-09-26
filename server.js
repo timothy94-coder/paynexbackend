@@ -1,376 +1,56 @@
 import express from "express";
-import fetch from "node-fetch";
 import cors from "cors";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
+const PORT = Number(process.env.PORT || 5000);
 
-app.use(
-  cors({
-    origin: true,
-    credentials: true,
-  })
-);
+const PUBLIC_KEY = process.env.PUBLIC_KEY;
+const SECRET_KEY = process.env.SECRET_KEY;
 
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
-const PORT = process.env.PORT || 5000;
-
-
-const activeTransactions = new Map();
-const statusThrottle = new Map();
-
-
+// Health check
 app.get("/", (req, res) => {
-  res.send("Backend alive (PayHero)");
+  res.json({ status: true, message: "Backend alive", port: PORT });
 });
-
 
 app.post("/api/runPrompt", async (req, res) => {
-
-  console.log("Incoming payment:", req.body);
-
-  const {
-    phone,
-    amount,
-    local_id,
-    transaction_desc
-  } = req.body;
-
-
-  if (!phone || !amount || !local_id) {
-    return res.status(400).json({
-      status:false,
-      message:"Missing required fields"
-    });
-  }
-
-
-  if(activeTransactions.has(local_id)){
-    return res.status(429).json({
-      status:false,
-      message:"Duplicate payment blocked"
-    });
-  }
-
-
-  activeTransactions.set(local_id, Date.now());
-
-
-  let formattedPhone =
-    phone.toString().replace(/\D/g,"");
-
-
-  if(formattedPhone.startsWith("07")){
-    formattedPhone =
-      "254" + formattedPhone.slice(1);
-  }
-
-
-  if(!formattedPhone.startsWith("254")){
-    return res.status(400).json({
-      status:false,
-      message:"Invalid phone number"
-    });
-  }
-
-
-
   try {
+    const { phone, amount, description } = req.body;
 
-
-    const controller = new AbortController();
-
-    const timeout=setTimeout(()=>{
-      controller.abort();
-    },90000);
-
-
-
-    const response = await fetch(
-      "https://backend.payhero.co.ke/api/v2/payments",
-      {
-        method:"POST",
-
-        headers:{
-          "Content-Type":"application/json",
-          "Authorization":
-          `Basic ${process.env.PAYHERO_BASIC_AUTH}`
-        },
-
-
-        body:JSON.stringify({
-
-          phone_number: formattedPhone,
-
-          amount:Number(amount),
-
-          channel_id:
-          process.env.PAYHERO_ACCOUNT_ID,
-
-          external_reference:
-          local_id,
-
-          customer_name:
-          transaction_desc || "Customer",
-
-          description:
-          transaction_desc || "Payment"
-
-        }),
-
-        signal:controller.signal
-      }
-    );
-
-
-    clearTimeout(timeout);
-
-
-
-    const data = await response.json();
-
-
-
-    console.log(
-      "PayHero Response:",
-      data
-    );
-
-
-
-    if(!response.ok){
-
-      return res.status(500).json({
-
-        status:false,
-
-        message:
-        data.message ||
-        "PayHero failed",
-
-        data
-
-      });
-
+    if (!phone || !amount) {
+      return res.status(400).json({ status: false, message: "Phone and amount required" });
     }
 
-
-
-    res.json({
-
-      status:true,
-
-      message:
-      "STK Push sent",
-
-      data
-
+    const response = await fetch(`${process.env.API_BASE_URL}/mpesa/payment/initiate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": process.env.SECRET_KEY, // ✅ secret key only
+      },
+      body: JSON.stringify({
+        amount,
+        phone,
+        description: description || "Payment",
+      }),
     });
 
-
-
-  }catch(err){
-
-    console.error(err);
-
-
-    res.status(500).json({
-
-      status:false,
-
-      message:"Payment server error",
-
-      error:err.message
-
+    const data = await response.json();
+    return res.status(response.ok ? 200 : response.status).json(data);
+  } catch (error) {
+    return res.status(502).json({
+      status: false,
+      message: "Could not connect to provider",
+      error: error.message,
     });
-
   }
-
 });
 
 
-
-
-
-app.post(
-"/api/payhero-callback",
-(req,res)=>{
-
-
-console.log(
-"PAYHERO CALLBACK:",
-JSON.stringify(req.body,null,2)
-);
-
-
-const result=req.body;
-
-
-if(result.status==="success"){
-
-console.log(
-"PAYMENT SUCCESS"
-);
-
-}else{
-
-console.log(
-"PAYMENT FAILED"
-);
-
-}
-
-
-res.sendStatus(200);
-
-
-});
-
-
-
-
-
-
-
-app.get(
-"/api/status/:id",
-async(req,res)=>{
-
-
-const id=req.params.id;
-
-
-const now=Date.now();
-
-
-const last=statusThrottle.get(id);
-
-
-if(last && now-last < 5000){
-
-return res.status(429).json({
-
-message:
-"Slow down"
-
-});
-
-}
-
-
-statusThrottle.set(id,now);
-
-
-
-try{
-
-
-const response =
-await fetch(
-`https://backend.payhero.co.ke/api/v2/transaction/${id}`,
-{
-
-headers:{
-
-Authorization:
-`Basic ${process.env.PAYHERO_BASIC_AUTH}`
-
-}
-
-});
-
-
-const data =
-await response.json();
-
-
-
-res.json(data);
-
-
-
-}catch(err){
-
-
-res.status(500).json({
-
-message:
-"Status check failed"
-
-});
-
-
-}
-
-
-});
-
-
-
-
-
-
-setInterval(()=>{
-
-const now=Date.now();
-
-
-for(const [key,time]
-of activeTransactions.entries()){
-
-
-if(now-time >
-10*60*1000){
-
-activeTransactions.delete(key);
-
-}
-
-}
-
-
-},60000);
-
-
-
-
-
-
-process.on(
-"uncaughtException",
-(err)=>{
-
-console.error(
-"Crash:",
-err
-);
-
-});
-
-
-
-process.on(
-"unhandledRejection",
-(err)=>{
-
-console.error(
-"Promise error:",
-err
-);
-
-});
-
-
-
-
-
-app.listen(PORT,()=>{
-
-console.log(
-`PayHero backend running ${PORT}`
-);
-
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Backend running on port ${PORT}`);
 });
